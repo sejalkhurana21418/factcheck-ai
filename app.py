@@ -6,6 +6,7 @@ import re
 import base64
 from datetime import datetime
 import os
+import time
 
 st.set_page_config(
     page_title="FactCheck AI — Truth Layer",
@@ -119,7 +120,7 @@ Extract between 5 and 15 claims."""
 
     # Use Groq's document understanding via base64 in user message
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=[
             {
                 "role": "user",
@@ -179,7 +180,7 @@ Return ONLY a raw JSON array — no markdown fences, no explanation, just the ar
 Extract between 5 and 15 of the most specific, verifiable claims."""
 
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt}],
         temperature=0.1,
         max_tokens=2000
@@ -266,7 +267,7 @@ Respond ONLY with this JSON (no markdown, no fences):
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
             max_tokens=600
@@ -310,7 +311,7 @@ def badge_html(verdict):
 
 # ── Page ───────────────────────────────────────────────────────────────────────
 st.markdown('<div class="hero-title">FactCheck AI</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-sub">// Automated Truth Layer — Powered by Groq + Tavily </div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-sub">// Automated Truth Layer — Powered by Groq + Tavily (Free)</div>', unsafe_allow_html=True)
 
 # Key checks
 groq_key = get_secret("GROQ_API_KEY")
@@ -387,6 +388,7 @@ if run_btn and uploaded_file:
             status.markdown(f"*🔎 Verifying {i+1}/{total}: '{claim_preview}...'*")
             prog.progress(pct)
             results.append(verify_claim(c))
+            time.sleep(2)  # avoid rate limit
 
         counts = {"VERIFIED": 0, "INACCURATE": 0, "FALSE": 0, "UNVERIFIABLE": 0}
         for r in results:
