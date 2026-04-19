@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from groq import Groq
+import requests
 import json
 import re
 import base64
@@ -81,88 +82,192 @@ footer{display:none;} #MainMenu{visibility:hidden;} header{visibility:hidden;}
 """, unsafe_allow_html=True)
 
 
-def get_api_key():
+# ── API Keys ───────────────────────────────────────────────────────────────────
+def get_secret(key):
     try:
-        if "GEMINI_API_KEY" in st.secrets:
-            return st.secrets["GEMINI_API_KEY"]
+        if key in st.secrets:
+            return st.secrets[key]
     except Exception:
         pass
-    return os.environ.get("GEMINI_API_KEY")
+    return os.environ.get(key)
 
 
-def extract_claims(pdf_bytes: bytes) -> list:
-    """Extract verifiable claims from PDF using Gemini Flash."""
-    genai.configure(api_key=get_api_key())
-    model = genai.GenerativeModel("gemini-2.0-flash")
+# ── Step 1: Extract text from PDF using Groq ───────────────────────────────────
+def extract_claims_from_pdf(pdf_bytes: bytes) -> list:
+    client = Groq(api_key=get_secret("GROQ_API_KEY"))
 
-    pdf_part = {
-        "inline_data": {
-            "mime_type": "application/pdf",
-            "data": base64.b64encode(pdf_bytes).decode()
-        }
-    }
+    # Encode PDF as base64 and send as a document message
+    pdf_b64 = base64.b64encode(pdf_bytes).decode()
 
-    prompt = """Analyze this PDF and extract ALL specific, verifiable claims such as:
+    prompt = """You are an expert fact-checker. I will give you text extracted from a PDF document.
+
+Extract ALL specific, verifiable claims such as:
 - Statistics and percentages (e.g. "revenue grew 45%", "3 billion users")
-- Dates and founding years
+- Dates and founding years (e.g. "founded in 2005")
 - Financial figures (valuations, revenue, market cap)
 - Named facts attributed to studies or organizations
 - Market size or population figures
+- Named record-breaking claims
 
-Return ONLY a JSON array — no markdown fences, no explanation, just the raw array:
+Return ONLY a raw JSON array — no markdown, no explanation:
 [
-  {"claim": "exact claim text", "context": "brief surrounding context", "type": "statistic|date|financial|technical"},
+  {"claim": "exact claim text from document", "context": "brief surrounding context", "type": "statistic|date|financial|technical"},
   ...
 ]
 
 Extract between 5 and 15 claims."""
 
-    response = model.generate_content([pdf_part, prompt])
-    raw = response.text.strip()
+    # Use Groq's document understanding via base64 in user message
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"Here is the PDF content (base64 encoded for reference). Please analyze the following extracted text and {prompt}"
+                    }
+                ]
+            }
+        ],
+        temperature=0.1,
+        max_tokens=2000
+    )
+
+    # Groq doesn't do PDF natively — we need to extract text first
+    # This will be handled by the caller who passes extracted text
+    raw = response.choices[0].message.content.strip()
     raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
     return json.loads(raw)
 
 
-def verify_claim(claim_obj: dict) -> dict:
-    """Verify a single claim using Gemini + Google Search grounding."""
-    genai.configure(api_key=get_api_key())
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """Extract raw text from PDF using pypdf."""
+    try:
+        from pypdf import PdfReader
+        import io
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() + "\n"
+        return text.strip()
+    except Exception as e:
+        return f"Error extracting PDF text: {str(e)}"
 
-    model = genai.GenerativeModel(
-        "gemini-2.0-flash",
-        tools="google_search_retrieval"
+
+def extract_claims(pdf_text: str) -> list:
+    """Use Groq/Llama to extract verifiable claims from text."""
+    client = Groq(api_key=get_secret("GROQ_API_KEY"))
+
+    prompt = f"""You are an expert fact-checker. Analyze the following document text and extract ALL specific, verifiable claims such as:
+- Statistics and percentages (e.g. "revenue grew 45%", "3 billion users")
+- Dates and founding years (e.g. "founded in 2005")
+- Financial figures (valuations, revenue, market cap)
+- Named facts attributed to studies or organizations
+- Market size or population figures
+
+DOCUMENT TEXT:
+{pdf_text[:6000]}
+
+Return ONLY a raw JSON array — no markdown fences, no explanation, just the array:
+[
+  {{"claim": "exact claim text", "context": "brief surrounding context", "type": "statistic|date|financial|technical"}},
+  ...
+]
+
+Extract between 5 and 15 of the most specific, verifiable claims."""
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.1,
+        max_tokens=2000
     )
+
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
+    return json.loads(raw)
+
+
+def search_web(query: str) -> str:
+    """Search the web using Tavily API and return summarised results."""
+    tavily_key = get_secret("TAVILY_API_KEY")
+    if not tavily_key:
+        return "No search results available (missing Tavily key)."
+
+    try:
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": tavily_key,
+                "query": query,
+                "search_depth": "basic",
+                "max_results": 4,
+                "include_answer": True
+            },
+            timeout=10
+        )
+        data = response.json()
+
+        parts = []
+        if data.get("answer"):
+            parts.append(f"Summary: {data['answer']}")
+        for r in data.get("results", [])[:3]:
+            parts.append(f"- {r.get('title','')}: {r.get('content','')[:200]}")
+        return "\n".join(parts) if parts else "No results found."
+
+    except Exception as e:
+        return f"Search failed: {str(e)}"
+
+
+def verify_claim(claim_obj: dict) -> dict:
+    """Verify a single claim using web search + Groq reasoning."""
+    client = Groq(api_key=get_secret("GROQ_API_KEY"))
 
     claim = claim_obj.get("claim", "")
     context = claim_obj.get("context", "")
     ctype = claim_obj.get("type", "statistic")
 
-    prompt = f"""You are a professional fact-checker. Search the web and verify this claim:
+    # Step A: search the web
+    search_results = search_web(f"fact check: {claim}")
+
+    # Step B: ask Groq to reason about it
+    prompt = f"""You are a professional fact-checker. A document contains this claim:
 
 CLAIM: "{claim}"
 CONTEXT: "{context}"
 TYPE: {ctype}
 
-After searching, respond ONLY with this JSON object (no markdown, no fences):
+LIVE WEB SEARCH RESULTS:
+{search_results}
+
+Based on the search results, verdict this claim. Respond ONLY with this JSON (no markdown, no fences):
 {{
   "claim": "{claim}",
   "verdict": "VERIFIED|INACCURATE|FALSE|UNVERIFIABLE",
   "confidence": <integer 0-100>,
-  "real_fact": "<the actual correct information you found>",
+  "real_fact": "<the actual correct information based on search results>",
   "explanation": "<1-2 sentences explaining your finding>",
   "sources": ["<source 1>", "<source 2>"]
 }}
 
-Verdict definitions:
-- VERIFIED: claim matches current web data within ~10%
-- INACCURATE: claim is outdated or off by a significant margin (state the correct value in real_fact)
+Verdict rules:
+- VERIFIED: claim matches search data within ~10%
+- INACCURATE: claim is outdated or off by significant margin (state the correct value)
 - FALSE: claim is demonstrably wrong or fabricated
-- UNVERIFIABLE: no reliable sources found to confirm or deny"""
+- UNVERIFIABLE: no reliable sources found"""
 
     try:
-        response = model.generate_content(prompt)
-        raw = response.text.strip()
-        raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=600
+        )
 
+        raw = response.choices[0].message.content.strip()
+        raw = re.sub(r"```json\s*|```\s*", "", raw).strip()
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         result = json.loads(match.group() if match else raw)
         result["claim_type"] = ctype
@@ -173,13 +278,14 @@ Verdict definitions:
             "claim": claim,
             "verdict": "UNVERIFIABLE",
             "confidence": 0,
-            "real_fact": "Could not retrieve information.",
-            "explanation": f"Verification error: {str(e)[:120]}",
+            "real_fact": "Could not process.",
+            "explanation": f"Error: {str(e)[:120]}",
             "sources": [],
             "claim_type": ctype
         }
 
 
+# ── UI helpers ─────────────────────────────────────────────────────────────────
 BADGE_MAP = {
     "VERIFIED":     ("badge-verified",     "✓ Verified"),
     "INACCURATE":   ("badge-inaccurate",   "⚠ Inaccurate"),
@@ -198,19 +304,24 @@ def badge_html(verdict):
     return f'<span class="badge {cls}">{label}</span>'
 
 
-# ── UI ─────────────────────────────────────────────────────────────────────────
+# ── Page ───────────────────────────────────────────────────────────────────────
 st.markdown('<div class="hero-title">FactCheck AI</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-sub">// Automated Truth Layer — Powered by Gemini + Google Search (Free)</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-sub">// Automated Truth Layer — Powered by Groq + Tavily (Free)</div>', unsafe_allow_html=True)
 
-api_key = get_api_key()
-if not api_key:
-    st.error("⚠️ No Gemini API key found. Please add GEMINI_API_KEY to your Streamlit secrets.")
+# Key checks
+groq_key = get_secret("GROQ_API_KEY")
+tavily_key = get_secret("TAVILY_API_KEY")
+
+if not groq_key:
+    st.error("⚠️ Missing GROQ_API_KEY in Streamlit secrets.")
     st.stop()
+if not tavily_key:
+    st.warning("⚠️ Missing TAVILY_API_KEY — web search disabled. Add it to Streamlit secrets for full fact-checking.")
 
 col1, col2 = st.columns([1.2, 1])
 
 with col1:
-    st.markdown("**Upload a PDF** to extract and verify every factual claim against live Google Search data.")
+    st.markdown("**Upload a PDF** to extract and verify every factual claim against live web data.")
     uploaded_file = st.file_uploader("Drop your PDF here", type=["pdf"], label_visibility="collapsed")
 
     if uploaded_file:
@@ -231,39 +342,45 @@ with col2:
         <p style="font-family:'DM Mono',monospace;font-size:0.75rem;color:#7c3aed;text-transform:uppercase;letter-spacing:0.1em;margin-bottom:1rem;">How it works</p>
         <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:1rem;">
             <span style="background:#1a1025;color:#a78bfa;border-radius:6px;padding:4px 10px;font-weight:700;font-size:0.85rem;flex-shrink:0;">01</span>
-            <div><b style="color:#e5e7eb;">Extract</b><br><span style="color:#6b7280;font-size:0.85rem;">Gemini reads your PDF and isolates every specific, verifiable claim.</span></div>
+            <div><b style="color:#e5e7eb;">Extract</b><br><span style="color:#6b7280;font-size:0.85rem;">Llama 3.3 reads your PDF and pulls every specific verifiable claim.</span></div>
         </div>
         <div style="display:flex;gap:12px;align-items:flex-start;margin-bottom:1rem;">
             <span style="background:#1a1025;color:#a78bfa;border-radius:6px;padding:4px 10px;font-weight:700;font-size:0.85rem;flex-shrink:0;">02</span>
-            <div><b style="color:#e5e7eb;">Verify</b><br><span style="color:#6b7280;font-size:0.85rem;">Each claim is cross-referenced live using Google Search grounding.</span></div>
+            <div><b style="color:#e5e7eb;">Search</b><br><span style="color:#6b7280;font-size:0.85rem;">Each claim is searched live via Tavily web search.</span></div>
         </div>
         <div style="display:flex;gap:12px;align-items:flex-start;">
             <span style="background:#1a1025;color:#a78bfa;border-radius:6px;padding:4px 10px;font-weight:700;font-size:0.85rem;flex-shrink:0;">03</span>
-            <div><b style="color:#e5e7eb;">Report</b><br><span style="color:#6b7280;font-size:0.85rem;">Every claim is flagged Verified / Inaccurate / False with real data.</span></div>
+            <div><b style="color:#e5e7eb;">Verdict</b><br><span style="color:#6b7280;font-size:0.85rem;">Llama reasons over results and flags each claim with real data.</span></div>
         </div>
     </div>""", unsafe_allow_html=True)
 
 st.divider()
 
-# ── Run pipeline ───────────────────────────────────────────────────────────────
+# ── Pipeline ───────────────────────────────────────────────────────────────────
 if run_btn and uploaded_file:
     pdf_bytes = uploaded_file.read()
     prog = st.progress(0)
     status = st.empty()
 
     try:
-        status.markdown("*⚙️ Step 1 — Reading PDF and extracting claims...*")
-        prog.progress(15)
+        status.markdown("*📄 Step 1 — Extracting text from PDF...*")
+        prog.progress(10)
+        pdf_text = extract_text_from_pdf(pdf_bytes)
 
-        claims_raw = extract_claims(pdf_bytes)
-        total_claims = len(claims_raw)
-        status.markdown(f"*✅ Found {total_claims} verifiable claims. Now checking each one...*")
+        if not pdf_text or len(pdf_text) < 50:
+            st.error("Could not extract text from this PDF. Make sure it's not a scanned image-only PDF.")
+            st.stop()
+
+        status.markdown("*🧠 Step 2 — Identifying verifiable claims...*")
+        prog.progress(20)
+        claims_raw = extract_claims(pdf_text)
+        total = len(claims_raw)
 
         results = []
         for i, c in enumerate(claims_raw):
-            pct = 15 + int(80 * (i + 1) / total_claims)
+            pct = 20 + int(75 * (i + 1) / total)
             claim_preview = c['claim'][:55]
-            status.markdown(f"*🔎 Verifying {i+1}/{total_claims}: '{claim_preview}...'*")
+            status.markdown(f"*🔎 Verifying {i+1}/{total}: '{claim_preview}...'*")
             prog.progress(pct)
             results.append(verify_claim(c))
 
@@ -279,7 +396,7 @@ if run_btn and uploaded_file:
         st.session_state["report"] = {
             "filename": uploaded_file.name,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M UTC"),
-            "total_claims": total_claims,
+            "total_claims": total,
             "summary": counts,
             "results": results
         }
@@ -289,7 +406,7 @@ if run_btn and uploaded_file:
         status.empty()
         st.error(f"❌ Error: {str(e)}")
 
-# ── Report display ─────────────────────────────────────────────────────────────
+# ── Report ─────────────────────────────────────────────────────────────────────
 if "report" in st.session_state:
     report = st.session_state["report"]
     s = report["summary"]
