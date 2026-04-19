@@ -262,7 +262,8 @@ if run_btn and uploaded_file:
         results = []
         for i, c in enumerate(claims_raw):
             pct = 15 + int(80 * (i + 1) / total_claims)
-            status.markdown(f"*🔎 Verifying {i+1}/{total_claims}: "{c['claim'][:55]}..."*")
+            claim_preview = c['claim'][:55]
+            status.markdown(f"*🔎 Verifying {i+1}/{total_claims}: '{claim_preview}...'*")
             prog.progress(pct)
             results.append(verify_claim(c))
 
