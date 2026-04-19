@@ -93,7 +93,7 @@ def get_api_key():
 def extract_claims(pdf_bytes: bytes) -> list:
     """Extract verifiable claims from PDF using Gemini Flash."""
     genai.configure(api_key=get_api_key())
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = genai.GenerativeModel("gemini-2.0-flash")
 
     pdf_part = {
         "inline_data": {
@@ -128,7 +128,7 @@ def verify_claim(claim_obj: dict) -> dict:
     genai.configure(api_key=get_api_key())
 
     model = genai.GenerativeModel(
-        "gemini-1.5-flash",
+        "gemini-2.0-flash",
         tools="google_search_retrieval"
     )
 
