@@ -233,7 +233,7 @@ def verify_claim(claim_obj: dict) -> dict:
     search_results = search_web(f"fact check: {claim}")
 
     # Step B: ask Groq to reason about it
-    prompt = f"""You are a professional fact-checker. A document contains this claim:
+    prompt = f"""You are a professional fact-checker. Analyze this claim against the web search results below.
 
 CLAIM: "{claim}"
 CONTEXT: "{context}"
@@ -242,21 +242,27 @@ TYPE: {ctype}
 LIVE WEB SEARCH RESULTS:
 {search_results}
 
-Based on the search results, verdict this claim. Respond ONLY with this JSON (no markdown, no fences):
+Use EXACTLY these three verdict definitions — they are precise, not general:
+
+- VERIFIED: The search results confirm the claim is accurate (within ~10% for numbers, correct for facts/dates).
+- INACCURATE: The search results FOUND evidence related to this claim, but the numbers are wrong, outdated, or off by a significant margin. Use this when real data EXISTS but contradicts the claim.
+- FALSE: The search results found NO credible evidence that this claim exists or ever happened. The claim appears to be completely fabricated with zero supporting sources.
+
+Decision rules:
+- Found evidence that contradicts the numbers → INACCURATE (state the real number)
+- Found evidence that contradicts the date/name/fact → INACCURATE (state the real detail)
+- Found ZERO evidence this claim exists anywhere → FALSE
+- Claim matches evidence → VERIFIED
+
+Respond ONLY with this JSON (no markdown, no fences):
 {{
   "claim": "{claim}",
-  "verdict": "VERIFIED|INACCURATE|FALSE|UNVERIFIABLE",
+  "verdict": "VERIFIED|INACCURATE|FALSE",
   "confidence": <integer 0-100>,
-  "real_fact": "<the actual correct information based on search results>",
-  "explanation": "<1-2 sentences explaining your finding>",
+  "real_fact": "<the actual correct figure/date/fact from search results, or 'No evidence found' if FALSE>",
+  "explanation": "<1-2 sentences explaining what you found vs what the claim states>",
   "sources": ["<source 1>", "<source 2>"]
-}}
-
-Verdict rules:
-- VERIFIED: claim matches search data within ~10%
-- INACCURATE: claim is outdated or off by significant margin (state the correct value)
-- FALSE: claim is demonstrably wrong or fabricated
-- UNVERIFIABLE: no reliable sources found"""
+}}"""
 
     try:
         response = client.chat.completions.create(
@@ -287,16 +293,14 @@ Verdict rules:
 
 # ── UI helpers ─────────────────────────────────────────────────────────────────
 BADGE_MAP = {
-    "VERIFIED":     ("badge-verified",     "✓ Verified"),
-    "INACCURATE":   ("badge-inaccurate",   "⚠ Inaccurate"),
-    "FALSE":        ("badge-false",        "✗ False"),
-    "UNVERIFIABLE": ("badge-unverifiable", "? Unverifiable"),
+    "VERIFIED":   ("badge-verified",   "✓ Verified"),
+    "INACCURATE": ("badge-inaccurate", "⚠ Inaccurate"),
+    "FALSE":      ("badge-false",      "✗ False — No Evidence Found"),
 }
 CARD_MAP = {
-    "VERIFIED":     "verdict-card verdict-verified",
-    "INACCURATE":   "verdict-card verdict-inaccurate",
-    "FALSE":        "verdict-card verdict-false",
-    "UNVERIFIABLE": "verdict-card verdict-unverifiable",
+    "VERIFIED":   "verdict-card verdict-verified",
+    "INACCURATE": "verdict-card verdict-inaccurate",
+    "FALSE":      "verdict-card verdict-false",
 }
 
 def badge_html(verdict):
@@ -424,11 +428,11 @@ if "report" in st.session_state:
     m1.metric("Total Claims", total)
     m2.metric("✓ Verified", s.get("VERIFIED", 0))
     m3.metric("⚠ Inaccurate", s.get("INACCURATE", 0))
-    m4.metric("✗ False", s.get("FALSE", 0))
+    m4.metric("✗ False / No Evidence", s.get("FALSE", 0))
     m5.metric("Trust Score", f"{trust}%")
 
     st.markdown("---")
-    filter_sel = st.radio("Filter by verdict:", ["All", "VERIFIED", "INACCURATE", "FALSE", "UNVERIFIABLE"], horizontal=True)
+    filter_sel = st.radio("Filter by verdict:", ["All", "VERIFIED", "INACCURATE", "FALSE"], horizontal=True)
     filtered = results if filter_sel == "All" else [r for r in results if r.get("verdict") == filter_sel]
 
     for res in filtered:
