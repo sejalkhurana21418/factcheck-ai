@@ -310,7 +310,7 @@ def badge_html(verdict):
 
 # ── Page ───────────────────────────────────────────────────────────────────────
 st.markdown('<div class="hero-title">FactCheck AI</div>', unsafe_allow_html=True)
-st.markdown('<div class="hero-sub">// Automated Truth Layer — Powered by Groq + Tavily (Free)</div>', unsafe_allow_html=True)
+st.markdown('<div class="hero-sub">// Automated Truth Layer — Powered by Groq + Tavily </div>', unsafe_allow_html=True)
 
 # Key checks
 groq_key = get_secret("GROQ_API_KEY")
