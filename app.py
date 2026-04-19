@@ -388,7 +388,7 @@ if run_btn and uploaded_file:
             status.markdown(f"*🔎 Verifying {i+1}/{total}: '{claim_preview}...'*")
             prog.progress(pct)
             results.append(verify_claim(c))
-            time.sleep(2)  # avoid rate limit
+            time.sleep(1)  # avoid rate limit
 
         counts = {"VERIFIED": 0, "INACCURATE": 0, "FALSE": 0, "UNVERIFIABLE": 0}
         for r in results:
